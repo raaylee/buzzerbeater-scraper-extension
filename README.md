@@ -1,6 +1,6 @@
 # 🏀 BuzzerBeater 数据采集器 & 查看器
 
-自动采集 BuzzerBeater 篮球经理游戏球员数据，配合桌面查看器(https://github.com/raaylee/buzzerbeater-viewer)进行多维分析与历史追踪。
+自动采集 BuzzerBeater 篮球经理游戏球员数据，配合桌面查看器(https://github.com/raaylee/buzzerbeater-viewer) 进行多维分析与历史追踪。
 
 ---
 

@@ -23,7 +23,7 @@
 ### 安装
 
 1. 打开 Chrome 浏览器，进入 `chrome://extensions/`
-2. 开启"开��者模式"
+2. 开启"开发者模式"
 3. 点击"加载已解压的扩展程序"，选择 `buzzerbeater-scraper-extension` 文件夹
 
 ### 使用方法

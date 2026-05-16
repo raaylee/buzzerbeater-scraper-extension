@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "BuzzerBeater数据采集器",
+  "version": "1.0.0",
+  "description": "自动采集BuzzerBeater球员数据并存储",
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.buzzerbeater.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.buzzerbeater.com/manage/transferlist.aspx*",
+        "https://www.buzzerbeater.com/player/*/*",
+        "https://www.buzzerbeater.com/team/*/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "BuzzerBeater数据采集"
+  }
+}

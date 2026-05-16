@@ -1,0 +1,12 @@
+BuzzerBeater 数据采集器 - Chrome 扩展
+
+├── manifest.json       # 扩展配置（Manifest V3）
+├── background.js       # Service Worker（消息路由 + IndexedDB 操作）
+├── content.js          # 内容脚本（3种页面数据自动抓取）
+├── database.js         # 数据库层（IndexedDB CRUD + SQLite 导出）
+├── popup.html          # 弹出窗口界面
+├── popup.js            # 弹出窗口逻辑
+├── sql-asm.js          # sql.js 纯 ASM 版本（导 SQLite 用，避免 CSP 问题）
+└── README.md           # 项目说明
+
+功能：自动采集球员数据（22个字段），30天去重，支持导出 JSON / SQLite

@@ -114,3 +114,9 @@ Chrome 扩展（IndexedDB 存储，30 天去重）
 | MVP / MVP | 9 |
 | hall of famer / 名人堂 | 10 |
 | all-time great / 历史级巨星 | 11 |
+
+---
+
+## 相关项目
+
+- [buzzerbeater-viewer](https://github.com/raaylee/buzzerbeater-viewer) — 配套的桌面数据查看器（PyQt6）

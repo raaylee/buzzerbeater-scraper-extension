@@ -67,22 +67,56 @@ function loadRecentPlayers() {
       return;
     }
 
-    // 只显示最近20条
-    const players = response.players.slice(0, 20);
-    listEl.innerHTML = players.map(p => `
+    // 按采集时间降序排列（最新优先）
+    const players = [...response.players]
+      .sort((a, b) => new Date(b.scrapedAt) - new Date(a.scrapedAt))
+      .slice(0, 20);
+
+    // 技能字段中文映射
+    const SKILL_LABELS = {
+      jump_shot: '跳投',
+      jump_range: '范围',
+      perim_def: '外防',
+      handling: '控球',
+      driving: '突破',
+      passing: '传球',
+      inside_shot: '内投',
+      inside_def: '内防',
+      rebound: '篮板',
+      shot_block: '盖帽'
+    };
+
+    listEl.innerHTML = players.map(p => {
+      // 构建技能显示
+      const skillParts = [];
+      for (const [key, label] of Object.entries(SKILL_LABELS)) {
+        const val = p[key];
+        if (val !== undefined && val !== null && val !== 0) {
+          skillParts.push(`${label}:${val}`);
+        }
+      }
+      const skillText = skillParts.length > 0
+        ? skillParts.join(' ')
+        : '';
+
+      return `
       <div class="player-item">
-        <div>
-          <span class="player-name">${escapeHtml(p.name)}</span>
-          <span class="position-tag">${escapeHtml(p.position || 'N/A')}</span>
-          ${p.nationality ? `<span class="position-tag" style="background:#1a3a5c">${escapeHtml(p.nationality)}</span>` : ''}
+        <div class="player-row">
+          <div>
+            <span class="player-name">${escapeHtml(p.name)}</span>
+            <span class="position-tag">${escapeHtml(p.position || 'N/A')}</span>
+            ${p.nationality ? `<span class="position-tag" style="background:#1a3a5c">${escapeHtml(p.nationality)}</span>` : ''}
+          </div>
+          <div class="player-meta">
+            ${p.age ? `年龄:${p.age}` : ''}${p.salary ? `\u2003薪金:$${Number(p.salary).toLocaleString()}` : ''}
+          </div>
+        </div>
+        <div class="player-row">
           <div class="player-id">ID: ${p.id}</div>
+          ${skillText ? `<div class="player-skills">${escapeHtml(skillText)}</div>` : ''}
         </div>
-        <div class="player-meta">
-          ${p.age ? `年龄 ${p.age}` : ''}
-          ${p.salary ? ` | $${Number(p.salary).toLocaleString()}` : ''}
-        </div>
-      </div>
-    `).join('');
+      </div>`;
+    }).join('');
   });
 }
 

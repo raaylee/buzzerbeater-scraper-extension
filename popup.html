@@ -10,7 +10,7 @@
       box-sizing: border-box;
     }
     body {
-      width: 420px;
+      width: 480px;
       min-height: 300px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: #1a1a2e;
@@ -73,14 +73,19 @@
       border: 1px solid #2a2a4a;
     }
     .player-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
       padding: 8px 12px;
       border-bottom: 1px solid #2a2a4a;
     }
     .player-item:last-child {
       border-bottom: none;
+    }
+    .player-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .player-row + .player-row {
+      margin-top: 2px;
     }
     .player-name {
       font-weight: 500;
@@ -93,6 +98,11 @@
     .player-id {
       font-size: 10px;
       color: #666;
+    }
+    .player-skills {
+      font-size: 10px;
+      color: #666;
+      white-space: nowrap;
     }
     .actions {
       display: flex;

@@ -387,31 +387,17 @@
     return 'top';
   }
 
-  // ─── 创建数据展示面板DOM（双列横向柱形图）──────────────────
-  function createDataPanel(player) {
-    const panel = document.createElement('div');
-    panel.className = 'bbs-local-data-panel';
-    panel.setAttribute('data-bbs-player-id', player.id);
-
-    const scrapedDate = player.scrapedAt
-      ? new Date(player.scrapedAt).toLocaleDateString('zh-CN')
-      : '';
-
-    // 检查是否有任何技能数据
+  // ─── 渲染技能柱形图 HTML（供 createDataPanel 和 history 复用）──
+  function renderSkillBars(player) {
     const hasAnySkill = SKILL_DISPLAY_KEYS.some(([key]) => {
       const v = player[key];
       return v !== undefined && v !== null && v !== 0;
     });
 
     if (!hasAnySkill) {
-      panel.innerHTML = `
-        <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
-        <div class="bbs-panel-empty">技能数据未采集</div>
-      `;
-      return panel;
+      return `<div class="bbs-panel-empty">技能数据未采集</div>`;
     }
 
-    // 双列柱形图：每两个技能一行
     const skillCells = SKILL_DISPLAY_KEYS.map(([key, label]) => {
       const v = player[key] || 0;
       const tier = getTier(v);
@@ -426,11 +412,158 @@
         </div>`;
     }).join('');
 
-    panel.innerHTML = `
-      <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
-      <div class="bbs-panel-bars">${skillCells}</div>
-    `;
-    return panel;
+    return `<div class="bbs-panel-bars">${skillCells}</div>`;
+  }
+
+  // ─── 创建数据展示面板DOM（双列横向柱形图）──────────────────
+  // V2.0.1 关键修复：使用 Shadow DOM 隔离面板内容，
+  // 防止 BuzzerBeater 页面的 ASP.NET WebForms 旧脚本（PageRequestManager/
+  // WebForm_InitCallback）的 Sizzle 引擎扫描我们的 DOM 时抛出
+  // "SyntaxError: '[s!='']:x' is not a valid selector" 错误，
+  // 该错误会触发页面的异常处理循环 → OOM → Chrome 标签页崩溃。
+  function createDataPanel(player) {
+    // Host 元素（仅用于定位和点击穿透，DOM 树中只有这一层）
+    const host = document.createElement('div');
+    host.className = 'bbs-local-data-panel';
+    host.setAttribute('data-bbs-player-id', player.id);
+
+    // 关键：attach Shadow DOM，mode:'open' 让我们能通过 host.shadowRoot 访问
+    const shadow = host.attachShadow({ mode: 'open' });
+
+    // 样式注入到 ShadowRoot 内部（不污染页面全局）
+    const styleEl = document.createElement('style');
+    styleEl.textContent = getPanelCss();
+    shadow.appendChild(styleEl);
+
+    // 内容容器
+    const panel = document.createElement('div');
+    panel.className = 'bbs-panel-inner';
+
+    const scrapedDate = player.scrapedAt
+      ? new Date(player.scrapedAt).toLocaleDateString('zh-CN')
+      : '';
+
+    // Header with history button
+    const header = document.createElement('div');
+    header.className = 'bbs-panel-header';
+    header.innerHTML = `<span class="bbs-header-title">📊 本地数据${scrapedDate ? ' (' + escapeHtml(scrapedDate) + ')' : ''}</span>`;
+
+    // History button
+    const historyBtn = document.createElement('button');
+    historyBtn.className = 'bbs-history-btn';
+    historyBtn.textContent = '📜 历史';
+    historyBtn.title = '展开/折叠历史快照';
+    historyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleHistoryPanel(panel, player.id, historyBtn);
+    });
+    header.appendChild(historyBtn);
+
+    panel.appendChild(header);
+    panel.insertAdjacentHTML('beforeend', renderSkillBars(player));
+    shadow.appendChild(panel);
+
+    // 返回 host，但 toggleHistoryPanel 需要操作 ShadowRoot 内的 panel
+    // 为了保持 toggleHistoryPanel 的接口兼容（操作 .bbs-history-section），
+    // 我们在 host 上挂一个引用供 toggleHistoryPanel 使用
+    host._bbsInner = panel;
+    host._bbsShadow = shadow;
+    return host;
+  }
+
+  // ─── 切换历史快照面板（就地展开/折叠）──────────────────────
+  // V2.0.1：参数 panel 实际是 host；通过 host._bbsInner 访问 ShadowRoot 内的 panel。
+  // Shadow DOM 隔离了 BuzzerBeater 页面旧脚本的 Sizzle 扫描，
+  // 不再触发 "[s!='']:x" selector 错误 → Chrome 不再崩溃。
+  function toggleHistoryPanel(panel, playerId, btn) {
+    // 兼容：panel 可能是 host（旧接口）或直接的 panel（防御性）
+    const inner = (panel && panel._bbsInner) || panel;
+
+    // 直接查询当前状态：找到 → 已展开（折叠）；找不到 → 折叠（展开）
+    let historySection = inner.querySelector('.bbs-history-section');
+
+    // 已展开 → 折叠
+    if (historySection) {
+      historySection.remove();
+      btn.textContent = '📜 历史';
+      btn.classList.remove('open');
+      return;
+    }
+
+    // 折叠 → 展开：先显示 loading
+    btn.textContent = '▼ 加载中...';
+    btn.classList.add('open');
+
+    chrome.runtime.sendMessage(
+      { action: 'getPlayerHistory', id: playerId },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('[BB Scraper] 获取历史失败:', chrome.runtime.lastError.message);
+          btn.textContent = '📜 历史';
+          btn.classList.remove('open');
+          return;
+        }
+
+        if (!response || !response.success || !response.history || response.history.length === 0) {
+          btn.textContent = '📜 历史';
+          btn.classList.remove('open');
+          // 无历史时临时提示一下
+          const noHist = document.createElement('div');
+          noHist.className = 'bbs-history-section';
+          noHist.innerHTML = '<div class="bbs-history-empty">暂无历史快照</div>';
+          inner.appendChild(noHist);
+          setTimeout(() => noHist.remove(), 1500);
+          return;
+        }
+
+        const history = response.history;
+        // V2.0.1 防御性：限制最多渲染 20 条快照，避免极端情况下 DOM 体积爆炸
+        const MAX_HISTORY_ITEMS = 20;
+        const safeHistory = history.slice(0, MAX_HISTORY_ITEMS);
+
+        historySection = document.createElement('div');
+        historySection.className = 'bbs-history-section';
+
+        let itemsHtml = '';
+        try {
+          itemsHtml = safeHistory.map((rec) => {
+            const dateStr = rec.scrapedAt
+              ? new Date(rec.scrapedAt).toLocaleDateString('zh-CN')
+              : '—';
+            const ageStr = rec.age ? `${rec.age}岁` : '';
+            const salaryStr = rec.salary ? `$${rec.salary.toLocaleString()}` : '';
+            const metaParts = [ageStr, salaryStr].filter(Boolean).join(' / ');
+            const metaHtml = metaParts ? `<div class="bbs-history-meta">${escapeHtml(metaParts)}</div>` : '';
+
+            const barsHtml = renderSkillBars(rec);
+            return `
+              <div class="bbs-history-item">
+                <div class="bbs-history-date">📅 ${escapeHtml(dateStr)}</div>
+                ${metaHtml}
+                <div class="bbs-history-skills">${barsHtml}</div>
+              </div>
+            `;
+          }).join('');
+        } catch (renderErr) {
+          console.error('[BB Scraper] 渲染历史快照失败:', renderErr);
+          btn.textContent = '📜 历史';
+          btn.classList.remove('open');
+          return;
+        }
+
+        historySection.innerHTML = itemsHtml;
+        inner.appendChild(historySection);
+        btn.textContent = '▼ 历史';
+
+        // 如果被截断，提示用户
+        if (history.length > MAX_HISTORY_ITEMS) {
+          const notice = document.createElement('div');
+          notice.className = 'bbs-history-empty';
+          notice.textContent = `仅显示最新 ${MAX_HISTORY_ITEMS} 条，共 ${history.length} 条`;
+          historySection.appendChild(notice);
+        }
+      }
+    );
   }
 
   // ─── HTML转义（供面板使用） ───────────────────────────────
@@ -485,32 +618,45 @@
     );
   }
 
-  // ─── 注入面板所需样式（仅注入一次）───────────────────────
-  function injectPanelStyles() {
-    if (document.getElementById('bbs-panel-styles')) return;
-    const style = document.createElement('style');
-    style.id = 'bbs-panel-styles';
-    style.textContent = `
-      .bbs-local-data-panel {
+  // ─── 面板 CSS（V2.0.1：改为函数返回，由 createDataPanel 在 ShadowRoot 内注入）──
+  // 关键：不再向 document.head 注入全局 <style>，
+  // 防止 BuzzerBeater 页面的旧脚本（Sizzle 引擎）扫描我们的 CSS 节点，
+  // 避免 "SyntaxError: '[s!='']:x' is not a valid selector" 崩溃。
+  // 每个 panel 在自己的 ShadowRoot 内独立 <style>，完全隔离。
+  function getPanelCss() {
+    return `
+      :host {
+        all: initial;
         position: absolute;
         right: 8px;
         bottom: 8px;
         width: min(360px, calc(100% - 20px));
+        z-index: 9999;
+        pointer-events: auto;
+      }
+      .bbs-panel-inner {
         background: rgba(26, 26, 46, 0.94);
         color: #e0e0e0;
         border: 1px solid #e94560;
         border-radius: 6px;
         padding: 8px 10px;
         font-size: 11px;
-        z-index: 9999;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-        pointer-events: none;
+        user-select: none;
+        box-sizing: border-box;
       }
       .bbs-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         font-weight: 600;
         color: #e94560;
         font-size: 10px;
         margin-bottom: 6px;
+      }
+      .bbs-header-title {
+        flex: 1;
       }
       .bbs-panel-bars {
         display: grid;
@@ -559,13 +705,71 @@
         font-style: italic;
         padding: 4px 0;
       }
+      .bbs-history-btn {
+        background: rgba(233, 69, 96, 0.15);
+        color: #e94560;
+        border: 1px solid rgba(233, 69, 96, 0.35);
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 10px;
+        cursor: pointer;
+        line-height: 1.4;
+        font-family: inherit;
+        margin-left: 8px;
+        transition: background 0.2s ease;
+      }
+      .bbs-history-btn:hover {
+        background: rgba(233, 69, 96, 0.3);
+      }
+      .bbs-history-btn.open {
+        background: rgba(233, 69, 96, 0.3);
+      }
+      .bbs-history-section {
+        margin-top: 8px;
+        border-top: 1px solid rgba(233, 69, 96, 0.25);
+        padding-top: 8px;
+        max-height: 420px;
+        overflow-y: auto;
+      }
+      .bbs-history-item {
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
+      .bbs-history-item:last-child {
+        border-bottom: none;
+        margin-bottom: 0;
+        padding-bottom: 0;
+      }
+      .bbs-history-date {
+        color: #e94560;
+        font-weight: 600;
+        font-size: 10px;
+        margin-bottom: 3px;
+      }
+      .bbs-history-meta {
+        color: #a0a0b0;
+        font-size: 10px;
+        margin-bottom: 4px;
+      }
+      .bbs-history-skills .bbs-panel-bars {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3px 10px;
+      }
+      .bbs-history-empty {
+        color: #888;
+        font-style: italic;
+        padding: 6px 0;
+        font-size: 10px;
+      }
     `;
-    document.head.appendChild(style);
   }
 
   // ─── 启动提取 ──────────────────────────────────────────────
+  // V2.0.1：不再调用 injectPanelStyles() —— 样式现在由每个 panel
+  // 在自己的 ShadowRoot 内独立注入（getPanelCss），不再污染页面全局。
   function tryExtract(attempts = 0) {
-    injectPanelStyles();
     extractData();
 
     // 如果是转会市场，再尝试几次（数据可能是动态加载的）

@@ -378,27 +378,57 @@
     ['shot_block', '盖帽']
   ];
 
-  // ─── 创建数据展示面板DOM ──────────────────────────────────
+  // ─── 技能值梯度分级 ────────────────────────────────────────
+  function getTier(v) {
+    if (!v || v === 0) return 'zero';
+    if (v <= 5)  return 'weak';
+    if (v <= 10) return 'mid';
+    if (v <= 15) return 'strong';
+    return 'top';
+  }
+
+  // ─── 创建数据展示面板DOM（双列横向柱形图）──────────────────
   function createDataPanel(player) {
     const panel = document.createElement('div');
     panel.className = 'bbs-local-data-panel';
     panel.setAttribute('data-bbs-player-id', player.id);
 
-    const skillParts = SKILL_DISPLAY_KEYS
-      .map(([key, label]) => {
-        const v = player[key];
-        return (v !== undefined && v !== null && v !== 0) ? `${label}:${v}` : null;
-      })
-      .filter(Boolean);
-
-    const skillText = skillParts.join(' ');
     const scrapedDate = player.scrapedAt
       ? new Date(player.scrapedAt).toLocaleDateString('zh-CN')
       : '';
 
+    // 检查是否有任何技能数据
+    const hasAnySkill = SKILL_DISPLAY_KEYS.some(([key]) => {
+      const v = player[key];
+      return v !== undefined && v !== null && v !== 0;
+    });
+
+    if (!hasAnySkill) {
+      panel.innerHTML = `
+        <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
+        <div class="bbs-panel-empty">技能数据未采集</div>
+      `;
+      return panel;
+    }
+
+    // 双列柱形图：每两个技能一行
+    const skillCells = SKILL_DISPLAY_KEYS.map(([key, label]) => {
+      const v = player[key] || 0;
+      const tier = getTier(v);
+      const pct = Math.min((v / 20) * 100, 100);
+      return `
+        <div class="bbs-skill-row">
+          <span class="bbs-skill-label">${label}</span>
+          <div class="bbs-skill-track">
+            <div class="bbs-skill-fill" data-tier="${tier}" style="width:${pct}%"></div>
+          </div>
+          <span class="bbs-skill-value">${v || '—'}</span>
+        </div>`;
+    }).join('');
+
     panel.innerHTML = `
       <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
-      ${skillText ? `<div class="bbs-panel-skills">${escapeHtml(skillText)}</div>` : '<div class="bbs-panel-empty">技能数据未采集</div>'}
+      <div class="bbs-panel-bars">${skillCells}</div>
     `;
     return panel;
   }
@@ -465,14 +495,13 @@
         position: absolute;
         right: 8px;
         bottom: 8px;
-        max-width: 60%;
-        background: rgba(26, 26, 46, 0.92);
+        width: min(360px, calc(100% - 20px));
+        background: rgba(26, 26, 46, 0.94);
         color: #e0e0e0;
         border: 1px solid #e94560;
         border-radius: 6px;
-        padding: 6px 10px;
+        padding: 8px 10px;
         font-size: 11px;
-        line-height: 1.4;
         z-index: 9999;
         box-shadow: 0 2px 8px rgba(0,0,0,0.4);
         pointer-events: none;
@@ -480,17 +509,55 @@
       .bbs-panel-header {
         font-weight: 600;
         color: #e94560;
-        margin-bottom: 3px;
         font-size: 10px;
+        margin-bottom: 6px;
       }
-      .bbs-panel-skills {
+      .bbs-panel-bars {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3px 10px;
+      }
+      .bbs-skill-row {
+        display: grid;
+        grid-template-columns: 26px 1fr 20px;
+        align-items: center;
+        gap: 4px;
+        font-size: 10px;
+        min-width: 0;
+      }
+      .bbs-skill-label {
         color: #a0a0b0;
-        white-space: normal;
-        word-break: break-all;
+        white-space: nowrap;
+      }
+      .bbs-skill-track {
+        height: 7px;
+        background: rgba(160, 160, 176, 0.15);
+        border-radius: 2px;
+        overflow: hidden;
+        min-width: 20px;
+      }
+      .bbs-skill-fill {
+        height: 100%;
+        border-radius: 2px;
+        min-width: 2px;
+        transition: width 0.3s ease;
+      }
+      .bbs-skill-fill[data-tier="weak"]   { background: #5a5a6e; }
+      .bbs-skill-fill[data-tier="mid"]    { background: #4a90e2; }
+      .bbs-skill-fill[data-tier="strong"] { background: #e94560; }
+      .bbs-skill-fill[data-tier="top"]    { background: #ff6b6b; }
+      .bbs-skill-fill[data-tier="zero"]   { display: none; }
+      .bbs-skill-value {
+        color: #e0e0e0;
+        font-weight: 600;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
       }
       .bbs-panel-empty {
         color: #666;
         font-style: italic;
+        padding: 4px 0;
       }
     `;
     document.head.appendChild(style);

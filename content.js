@@ -279,7 +279,7 @@
   }
 
   // ─── 主提取函数 ──────────────────────────────────────────────
-  function extractData() {
+  async function extractData() {
     let players = [];
 
     switch (pageType) {
@@ -309,23 +309,27 @@
     }
 
     if (players.length > 0) {
-      chrome.runtime.sendMessage(
-        { action: 'savePlayers', players: players },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('[BB Scraper] 发送消息失败:', chrome.runtime.lastError.message);
-            return;
+      // 先保存到数据库（等 meta 更新完成后再注入面板，
+      // 避免新采集的数据还没入库就被面板覆盖）
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          { action: 'savePlayers', players: players },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              console.error('[BB Scraper] 发送消息失败:', chrome.runtime.lastError.message);
+            } else if (response && response.success) {
+              console.log(`[BB Scraper] 保存成功: ${response.saved} 新增, ${response.skipped} 跳过`);
+            }
+            resolve();
           }
-          if (response && response.success) {
-            console.log(`[BB Scraper] 保存成功: ${response.saved} 新增, ${response.skipped} 跳过`);
-          }
-        }
-      );
+        );
+      });
     }
 
     // 仅球员详情和球队页面：在页面内显示本地已存储的数据
+    // 只对页面已成功提取的球员查询本地数据库，无数据的球员不查询
     if (pageType === 'playerOverview' || pageType === 'teamPlayers') {
-      injectLocalDataPanels();
+      injectLocalDataPanels(players);
     }
   }
 
@@ -390,26 +394,20 @@
   }
 
   // ─── 在页面内注入本地数据面板 ─────────────────────────────
-  function injectLocalDataPanels() {
-    const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
-    if (boxes.length === 0) return;
+  // 只对页面已成功提取到数据的球员查询本地数据库：
+  // - 传入的 extractedPlayers 是 extractData() 中成功提取的球员数组
+  // - 不再重复扫描所有 box 并对每个都查询数据库
+  // - 无数据的球员（如球队页面其他无技能球员）直接跳过
+  function injectLocalDataPanels(extractedPlayers) {
+    if (!extractedPlayers || extractedPlayers.length === 0) return;
 
-    const ids = [];
-    const boxIdMap = new Map(); // id -> box element
-    boxes.forEach(box => {
-      // 跳过已经注入过面板的容器
-      if (box.querySelector('.bbs-local-data-panel')) return;
-      const id = extractIdFromContainer(box);
-      if (id) {
-        ids.push(id);
-        boxIdMap.set(id, box);
-      }
-    });
-
-    if (ids.length === 0) return;
+    const targetIds = new Set(
+      extractedPlayers.filter(p => p.id).map(p => p.id)
+    );
+    if (targetIds.size === 0) return;
 
     chrome.runtime.sendMessage(
-      { action: 'getPlayersByIds', ids: ids },
+      { action: 'getPlayersByIds', ids: [...targetIds] },
       (response) => {
         if (chrome.runtime.lastError || !response || !response.success) return;
         const players = response.players || [];
@@ -418,8 +416,14 @@
         const playerMap = new Map(players.map(p => [p.id, p]));
         let injected = 0;
 
-        boxIdMap.forEach((box, id) => {
-          const player = playerMap.get(id);
+        // 只扫描目标 ID 对应的 box，不为无关 box 浪费 DOM 解析
+        const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
+        boxes.forEach(box => {
+          if (box.querySelector('.bbs-local-data-panel')) return;
+          const boxId = extractIdFromContainer(box);
+          if (!boxId || !targetIds.has(boxId)) return;
+
+          const player = playerMap.get(boxId);
           if (!player) return;
 
           // 确保容器可以定位

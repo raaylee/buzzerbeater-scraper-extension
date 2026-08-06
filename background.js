@@ -45,6 +45,9 @@ async function handleMessage(message) {
     case 'getPlayersByIds':
       return await handleGetPlayersByIds(message.ids);
 
+    case 'getPlayerHistory':
+      return await handleGetPlayerHistory(message.id);
+
     case 'clearAll':
       return await handleClearAll();
 
@@ -91,4 +94,9 @@ async function handleImportSQLite(dataArray) {
 async function handleGetPlayersByIds(ids) {
   const players = await db.getPlayersByIds(ids);
   return { players };
+}
+
+async function handleGetPlayerHistory(id) {
+  const history = await db.getPlayerHistory(id);
+  return { history };
 }

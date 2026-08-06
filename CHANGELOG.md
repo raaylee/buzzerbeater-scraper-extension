@@ -1,5 +1,45 @@
 # BuzzerBeater Scraper Extension - 更新日志
 
+## Ver 2.0.0 (2026-08-06)
+
+### 新增功能
+- **球员历史快照**：每个球员可保留多条历史快照，追踪长期成长轨迹
+  - `IndexedDB` 主键改为 `recordId`（自增），每条快照独立存储
+  - 30 天去重规则继续生效；>=30 天**插入新快照**（不覆盖）
+  - `getStats` 改为独立球员数（distinct id），不再是快照总数
+  - 新增 `getPlayerHistory(id)` API
+- **弹窗历史快照面板**：顶部 "📜 历史" 按钮触发
+  - 双视图切换（`display: none/block`），无遮罩层/弹窗管理
+  - 输入球员 ID 或点击主列表球员项 → 自动查询历史
+  - 显示所有快照：编号、采集时间、技能简写、元数据
+  - 顶部汇总：快照总数 + 日期列表
+
+### ⚠️ 破坏性变更（v2 用户必读）
+
+**v2.0 升级会清空原有 IndexedDB 数据**，原因是 IndexedDB schema 升级限制：
+- v2 `players` store 主键是 `id`（每个球员一条记录）
+- v3 `players` store 主键是 `recordId`（自增，每球员多条）
+- IndexedDB 不允许两个同名 store 同时存在，schema 升级只能破坏性重建
+
+**v2 用户升级前必须先导出 JSON 备份**：
+1. 升级前打开插件 → JSON 导出
+2. 安装新版本
+3. 插件将自动重建空数据库（v3 schema）
+4. 通过 JSON 导入恢复数据（自动适配 v3 多快照模式）
+
+**未导出直接升级的用户**：原数据无法恢复，请谨慎。
+
+### 修改文件
+| 文件 | 改动内容 |
+|------|----------|
+| `manifest.json` | 版本号 1.3.0 → 2.0.0 |
+| `database.js` | v3 schema（recordId 主键 + id/scrapedAt/position 索引）；`_refreshMetaAfterWrite` 改为独立球员数；`savePlayers`/`importPlayers` >=30天插入新快照；`getPlayersByIds` 用 id 索引 + openCursor 取最新；`getPlayerHistory(id)` 新增；`exportAsSQLite` schema 加 `record_id`；`importPlayers` 剥离 recordId 让 autoIncrement 生效；`_batchGet` 标注废弃 |
+| `background.js` | 新增 `getPlayerHistory` 消息路由 + `handleGetPlayerHistory` handler |
+| `popup.html` | 顶部加 "📜 历史" 按钮；新增 `#historyView` 面板 + 完整 CSS |
+| `popup.js` | 视图切换（`showHistoryView`/`showMainView`）；`loadPlayerHistory`/`renderHistoryList`；主列表球员项加 `clickable-player` class + `data-player-id`，点击快捷跳转历史 |
+
+---
+
 ## Ver 1.3.0 (2026-08-06)
 
 ### 新增功能

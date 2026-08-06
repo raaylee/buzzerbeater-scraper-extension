@@ -31,6 +31,28 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   });
+
+  // 历史记录视图事件绑定
+  document.getElementById('btnHistory').addEventListener('click', showHistoryView);
+  document.getElementById('btnBack').addEventListener('click', showMainView);
+  document.getElementById('btnQueryHistory').addEventListener('click', () => {
+    const id = document.getElementById('historyInput').value.trim();
+    if (id) loadPlayerHistory(id);
+  });
+  document.getElementById('historyInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const id = e.target.value.trim();
+      if (id) loadPlayerHistory(id);
+    }
+  });
+
+  // 主列表点击球员快捷跳转历史
+  document.getElementById('playerList').addEventListener('click', (e) => {
+    const item = e.target.closest('.player-item');
+    if (item && item.dataset.playerId) {
+      showHistoryView(item.dataset.playerId);
+    }
+  });
 });
 
 function loadStats() {
@@ -106,7 +128,7 @@ function loadRecentPlayers() {
         : '';
 
       return `
-      <div class="player-item">
+      <div class="player-item clickable-player" data-player-id="${p.id}">
         <div class="player-row">
           <div>
             <span class="player-name">${escapeHtml(p.name)}</span>
@@ -233,6 +255,97 @@ function importPlayers(players, source) {
       setStatus(`${source}导入失败: ` + (response?.error || '未知错误'));
     }
   });
+}
+
+function showHistoryView(preloadId) {
+  document.getElementById('mainView').style.display = 'none';
+  document.getElementById('historyView').style.display = 'block';
+  if (preloadId) {
+    document.getElementById('historyInput').value = preloadId;
+    loadPlayerHistory(preloadId);
+  }
+}
+
+function showMainView() {
+  document.getElementById('historyView').style.display = 'none';
+  document.getElementById('mainView').style.display = 'block';
+  document.getElementById('historyInput').value = '';
+  document.getElementById('historyCount').textContent = '';
+  document.getElementById('historyList').innerHTML =
+    '<div class="history-empty">输入球员 ID 或点击主列表中的球员查看历史</div>';
+}
+
+function loadPlayerHistory(id) {
+  const listEl = document.getElementById('historyList');
+  const countEl = document.getElementById('historyCount');
+  listEl.innerHTML = '<div class="loading">查询中...</div>';
+  countEl.textContent = '';
+
+  chrome.runtime.sendMessage({ action: 'getPlayerHistory', id }, (response) => {
+    if (chrome.runtime.lastError) {
+      listEl.innerHTML = '<div class="history-empty">查询失败，请重试</div>';
+      return;
+    }
+
+    if (response && response.success && Array.isArray(response.history) && response.history.length > 0) {
+      renderHistoryList(response.history);
+    } else {
+      listEl.innerHTML = '<div class="history-empty">未找到该球员的历史记录</div>';
+    }
+  });
+}
+
+function renderHistoryList(history) {
+  const listEl = document.getElementById('historyList');
+  const countEl = document.getElementById('historyCount');
+
+  const SKILL_LABELS = {
+    jump_shot: '跳投',
+    jump_range: '范围',
+    perim_def: '外防',
+    handling: '控球',
+    driving: '突破',
+    passing: '传球',
+    inside_shot: '内投',
+    inside_def: '内防',
+    rebound: '篮板',
+    shot_block: '盖帽'
+  };
+
+  const dates = history.map(h => {
+    const d = new Date(h.scrapedAt);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+
+  countEl.innerHTML = `该球员共有 <strong style="color:#e94560;">${history.length}</strong> 条历史快照<br>
+  <span style="font-size:11px;color:#666;">${dates.join(' / ')}</span>`;
+
+  listEl.innerHTML = history.map((h, index) => {
+    const d = new Date(h.scrapedAt);
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+    const skillParts = [];
+    for (const [key, label] of Object.entries(SKILL_LABELS)) {
+      const val = h[key];
+      if (val !== undefined && val !== null && val !== 0) {
+        skillParts.push(`${label}:${val}`);
+      }
+    }
+    const skillText = skillParts.length > 0 ? skillParts.join(' ') : '无技能数据';
+
+    const metaParts = [];
+    if (h.age) metaParts.push(`年龄:${h.age}`);
+    if (h.salary) metaParts.push(`薪金:$${Number(h.salary).toLocaleString()}`);
+    if (h.position) metaParts.push(`位置:${h.position}`);
+    if (h.potential) metaParts.push(`潜力:${h.potential}`);
+    const metaText = metaParts.join('　');
+
+    return `<div class="history-item">
+      <div class="history-date">#${index + 1}　${dateStr}</div>
+      <div class="history-skills">${escapeHtml(skillText)}</div>
+      ${metaText ? `<div class="history-meta">${escapeHtml(metaText)}</div>` : ''}
+    </div>`;
+  }).join('');
 }
 
 function setStatus(text) {

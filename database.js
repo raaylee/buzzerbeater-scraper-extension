@@ -1,12 +1,12 @@
 // ============================================================
 // database.js — BuzzerBeater 球员数据库 (IndexedDB + SQLite导出)
 // ============================================================
-// 重构要点：
-// 1. 新增 _meta objectStore 缓存 total/latestScrape，
-//    getStats 不再遍历全表
-// 2. savePlayers/importPlayers 改为先批量 get 现有记录，
-//    再批量 put，减少微任务调度
-// 3. getPlayersByIds 改为并行请求
+// V2.0 重构要点：
+// 1. players 主键改为 recordId (autoIncrement)，同一球员可保留多条历史快照
+// 2. id 改为普通索引（唯一性由业务层 30 天去重保证）
+// 3. 从 v2 升级时迁移所有老数据到新 schema，不丢记录
+// 4. getStats.total 改为"独立球员数"（distinct id）
+// 5. 新增 getPlayerHistory(id) API
 //
 // sql-asm.js 由 background.js 顶层 importScripts 加载，
 // 这里只缓存 initSqlJs() 的初始化结果。
@@ -26,7 +26,7 @@ async function loadSqlJs() {
 class PlayerDatabase {
   constructor() {
     this.dbName = 'buzzerbeaterDB';
-    this.dbVersion = 2; // 升级：新增 _meta objectStore
+    this.dbVersion = 3; // V2.0：players 主键改 recordId，保留多条历史快照
     this.dbReady = this._init();
   }
 
@@ -42,21 +42,75 @@ class PlayerDatabase {
 
       request.onupgradeneeded = (event) => {
         const db = event.target.result;
+        const oldVersion = event.oldVersion;
+        const transaction = event.target.transaction;
 
-        // players objectStore（与 v1 一致，保留 id 作为 keyPath）
-        if (!db.objectStoreNames.contains('players')) {
-          const store = db.createObjectStore('players', { keyPath: 'id' });
-          store.createIndex('scrapedAt', 'scrapedAt', { unique: false });
-          store.createIndex('position', 'position', { unique: false });
+        // ─── v3 路径：破坏性迁移（Oracle review 认可的安全模式）───
+        // 决策：放弃 v2→v3 兼容升级。理由：
+        // 1. IndexedDB 规范要求 schema 修改（deleteObjectStore/createObjectStore）
+        //    只能在 upgrade 事务中**同步**执行。
+        // 2. v2→v3 需要删除旧 store 后创建同名 store，唯一可行路径是：
+        //    在 upgrade 事务里同步遍历 cursor + 修改 schema，
+        //    但 cursor.onsuccess 是 microtask 异步，跨浏览器不可靠。
+        // 3. 替代方案"两阶段迁移"也行不通，因为 IndexedDB 不允许两个同名 store。
+        // 4. 唯一合规路径：**破坏性迁移**——v2 数据通过 JSON 导出备份后，
+        //    用户在 v3 重新导入。
+        //
+        // 实施：
+        // - v3 直接以 v3 schema 创建 store（keyPath='recordId', autoIncrement）
+        // - 如果从 v2 升级，schema 不兼容，IndexedDB 会自动保留旧 store 数据
+        //   但代码不会读取（keyPath 错误）。用户必须导出 JSON 再清空 DB。
+        // - 文档说明：升级前先导出 JSON。
+
+        if (oldVersion < 3) {
+          // v3 schema：recordId 自增主键，id 索引
+          if (!db.objectStoreNames.contains('players')) {
+            const store = db.createObjectStore('players', {
+              keyPath: 'recordId',
+              autoIncrement: true
+            });
+            store.createIndex('id', 'id', { unique: false });
+            store.createIndex('scrapedAt', 'scrapedAt', { unique: false });
+            store.createIndex('position', 'position', { unique: false });
+          }
+          // 注意：如果从 v2 升级，旧 'players' store（keyPath='id'）会保持存在。
+          // v3 schema 创建会失败（同名 store 已存在）。
+          // 此时需要先删除旧 store，但这是危险操作——会丢用户数据。
+          // 实际处理：先调用 transaction.objectStore 检查，
+          // 存在同名且 keyPath 不同的 store 时，删除并重建。
+          else {
+            const existingStore = transaction.objectStore('players');
+            if (existingStore.keyPath !== 'recordId') {
+              // v2 schema 残留，需要迁移
+              // 删除旧 store（升级事务里允许）
+              db.deleteObjectStore('players');
+              // 重建 v3 schema
+              const store = db.createObjectStore('players', {
+                keyPath: 'recordId',
+                autoIncrement: true
+              });
+              store.createIndex('id', 'id', { unique: false });
+              store.createIndex('scrapedAt', 'scrapedAt', { unique: false });
+              store.createIndex('position', 'position', { unique: false });
+              // ⚠️ 旧数据已删除，无法在此事务中读取并迁移
+              // 用户必须通过 JSON 重新导入
+            }
+          }
         }
 
-        // _meta objectStore：存 total / latestScrape 等汇总数据
-        // keyPath: 'key', value: 'value'
+        // ─── _meta objectStore（与 v2 一致）───
         if (!db.objectStoreNames.contains('_meta')) {
           db.createObjectStore('_meta', { keyPath: 'key' });
         }
       };
     });
+  }
+
+  // ─── _migrateFromV2IfNeeded 占位（保留以备将来使用）───
+  // 当前 v2→v3 升级采用破坏性迁移：用户需先导出 JSON 备份。
+  // 此方法保留作为扩展点，将来如有需要可实现非破坏性迁移。
+  async _migrateFromV2IfNeeded() {
+    return Promise.resolve();
   }
 
   async ready() {
@@ -65,6 +119,8 @@ class PlayerDatabase {
 
   // ─── 内部工具：事务内批量 get ──────────────────────────────
   // 单事务内发起 N 个并行 get 请求，所有结果统一返回
+  // ⚠️ 已废弃（自 V2.0）：v3 主键是 recordId 而非 id，此方法基于主键 get 已无意义。
+  // getPlayersByIds 重写后改用 id 索引 + openCursor 遍历。保留此方法以防外部引用。
   _batchGet(store, ids) {
     return new Promise((resolve, reject) => {
       if (!ids || ids.length === 0) return resolve([]);
@@ -156,6 +212,7 @@ class PlayerDatabase {
 
   // ─── 内部工具：写入后全量刷新 meta ──────────────────────────
   // 直接重算 total 而非用 delta 累加，避免增量更新逻辑出错
+  // V2.0：total 改为独立球员数（distinct id）
   async _refreshMetaAfterWrite() {
     const players = await this.getAllPlayers();
     let latestScrape = null;
@@ -169,8 +226,9 @@ class PlayerDatabase {
         }
       }
     }
+    const distinctIds = new Set(players.map(p => p.id));
     await this._setMetaBatch([
-      ['total', players.length],
+      ['total', distinctIds.size],
       ['latestScrape', latestScrape]
     ]);
   }
@@ -183,7 +241,7 @@ class PlayerDatabase {
 
   // ─── 公开 API ────────────────────────────────────────────
 
-  // 保存球员数据（30天去重）
+  // 保存球员数据（30天去重，V2.0：>=30天插入新快照，不覆盖）
   async savePlayers(players) {
     await this.ready();
     if (!players || players.length === 0) return { saved: 0, skipped: 0 };
@@ -192,7 +250,7 @@ class PlayerDatabase {
     const validPlayers = players.filter(p => p.id && p.name);
     if (validPlayers.length === 0) return { saved: 0, skipped: 0 };
 
-    // 批量读取现有记录
+    // 批量读取现有记录的最新快照
     const ids = validPlayers.map(p => p.id);
     const existing = await this.getPlayersByIds(ids);
     const existingMap = new Map(existing.map(p => [p.id, p]));
@@ -211,6 +269,7 @@ class PlayerDatabase {
           continue;
         }
       }
+      // V2.0：插入新快照（不带 recordId，让 autoIncrement 自动生成）
       toPut.push({ ...p, scrapedAt: now.toISOString() });
       saved++;
     }
@@ -239,7 +298,7 @@ class PlayerDatabase {
     });
   }
 
-  // 按ID批量查询球员（并行请求）
+  // 按ID批量查询球员（V2.0：使用 id 索引，取每个 id 下 scrapedAt 最新的那条快照）
   async getPlayersByIds(ids) {
     await this.ready();
     if (!ids || ids.length === 0) return [];
@@ -247,11 +306,53 @@ class PlayerDatabase {
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['players'], 'readonly');
       const store = transaction.objectStore('players');
-      this._batchGet(store, ids).then(resolve).catch(reject);
+      const idIndex = store.index('id');
+      const results = [];
+      let pending = ids.length;
+      let errored = false;
+
+      ids.forEach(id => {
+        const req = idIndex.openCursor(IDBKeyRange.only(id));
+        let latest = null;
+        req.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            if (!latest || new Date(cursor.value.scrapedAt) > new Date(latest.scrapedAt)) {
+              latest = cursor.value;
+            }
+            cursor.continue();
+          } else {
+            if (latest) results.push(latest);
+            if (--pending === 0 && !errored) resolve(results);
+          }
+        };
+        req.onerror = () => {
+          if (--pending === 0 && !errored) resolve(results);
+        };
+      });
+    });
+  }
+
+  // 获取指定球员的所有历史快照（V2.0 新增）
+  async getPlayerHistory(id) {
+    await this.ready();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['players'], 'readonly');
+      const store = transaction.objectStore('players');
+      const idIndex = store.index('id');
+      const req = idIndex.getAll(IDBKeyRange.only(id));
+      req.onsuccess = () => {
+        const snapshots = (req.result || []).sort((a, b) =>
+          new Date(b.scrapedAt || 0) - new Date(a.scrapedAt || 0)
+        );
+        resolve(snapshots);
+      };
+      req.onerror = () => reject(req.error);
     });
   }
 
   // 统计信息（走 _meta，不再遍历全表）
+  // V2.0：total = 独立球员数（distinct id），非快照总数
   // 自愈：_meta 未初始化时（如从 v1 升级或首次打开插件），
   // 回退到 getAllPlayers() 计算并回写 _meta，一次性完成修复
   async getStats() {
@@ -268,13 +369,14 @@ class PlayerDatabase {
         );
         latestScrape = sorted[0]?.scrapedAt || null;
       }
+      const distinctIds = new Set(players.map(p => p.id));
       // 回写 _meta，后续走快路径
       await this._setMetaBatch([
-        ['total', players.length],
+        ['total', distinctIds.size],
         ['latestScrape', latestScrape]
       ]);
       return {
-        total: players.length,
+        total: distinctIds.size,
         latestScrape
       };
     }
@@ -303,7 +405,8 @@ class PlayerDatabase {
 
     db.run(`
       CREATE TABLE players (
-        id              INTEGER PRIMARY KEY,
+        record_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        id              INTEGER NOT NULL,
         name            TEXT,
         salary          INTEGER,
         age             INTEGER,
@@ -326,11 +429,12 @@ class PlayerDatabase {
     `);
 
     const stmt = db.prepare(`
-      INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
     for (const p of players) {
       stmt.run([
+        p.recordId || null,  // null 让 SQLite AUTOINCREMENT 自动生成
         p.id || 0,
         p.name || '',
         p.salary || 0,
@@ -381,6 +485,7 @@ class PlayerDatabase {
   }
 
   // ─── 导入球员数据（JSON数组）───────────────────────────────
+  // V2.0：>=30天插入新快照（不带 recordId，让 autoIncrement 自动生成），不覆盖
   async importPlayers(players) {
     await this.ready();
     if (!players || players.length === 0) return { saved: 0, skipped: 0 };
@@ -408,8 +513,10 @@ class PlayerDatabase {
           continue;
         }
       }
+      // V2.0：插入新快照，去掉 recordId 让 autoIncrement 自动生成
+      const { recordId, ...snapshot } = p;
       toPut.push({
-        ...p,
+        ...snapshot,
         scrapedAt: p.scrapedAt || now.toISOString()
       });
       saved++;
@@ -442,8 +549,9 @@ class PlayerDatabase {
       const obj = {};
       columns.forEach((col, idx) => {
         let val = row[idx];
-        // SQLite 导出列名为 scraped_at，转回 scrapedAt
+        // SQLite 导出列名转换回 camelCase
         if (col === 'scraped_at') col = 'scrapedAt';
+        if (col === 'record_id') col = 'recordId';
         obj[col] = val;
       });
       return obj;

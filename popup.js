@@ -203,7 +203,7 @@ function handleImport(event) {
         data: Array.from(new Uint8Array(buffer))
       }, (response) => {
         if (response && response.success) {
-          setStatus(`SQLite导入成功 (${response.count}条记录)`);
+          setStatus(`SQLite导入成功 (共${response.count}条: 新增${response.saved} 跳过${response.skipped})`);
           loadStats();
           loadRecentPlayers();
         } else {

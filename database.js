@@ -154,66 +154,31 @@ class PlayerDatabase {
     });
   }
 
-  // ─── 内部工具：根据 put 列表增量更新 meta ──────────────────
-  async _updateMetaFromPuts(putList, options = {}) {
-    if (!putList || putList.length === 0) return;
-
-    const ids = putList.map(p => p.id);
-    const existing = await this.getPlayersByIds(ids);
-    const existingMap = new Map(existing.map(p => [p.id, p]));
-
-    let totalDelta = 0;
+  // ─── 内部工具：写入后全量刷新 meta ──────────────────────────
+  // 直接重算 total 而非用 delta 累加，避免增量更新逻辑出错
+  async _refreshMetaAfterWrite() {
+    const players = await this.getAllPlayers();
     let latestScrape = null;
-    const positionDelta = {};
-
-    for (const p of putList) {
-      const prev = existingMap.get(p.id);
-      if (!prev) {
-        totalDelta += 1;
-      }
-      // 计算最新 scrapedAt
-      const t = p.scrapedAt ? new Date(p.scrapedAt).getTime() : 0;
-      if (!latestScrape || t > latestScrape) latestScrape = t;
-      // 位置聚合（可选）
-      if (options.byPosition) {
-        const pos = p.position || 'Unknown';
-        // 只统计新增的
-        if (!prev) {
-          positionDelta[pos] = (positionDelta[pos] || 0) + 1;
-        } else if (prev.position !== pos) {
-          positionDelta[pos] = (positionDelta[pos] || 0) + 1;
-          positionDelta[prev.position] = (positionDelta[prev.position] || 0) - 1;
+    if (players.length > 0) {
+      let maxTime = 0;
+      for (const p of players) {
+        const t = p.scrapedAt ? new Date(p.scrapedAt).getTime() : 0;
+        if (t > maxTime) {
+          maxTime = t;
+          latestScrape = p.scrapedAt;
         }
       }
     }
+    await this._setMetaBatch([
+      ['total', players.length],
+      ['latestScrape', latestScrape]
+    ]);
+  }
 
-    // 读取当前 meta，叠加 delta
-    const metaKeys = ['total', 'latestScrape'];
-    if (options.byPosition) metaKeys.push('byPosition');
-    const current = await this._getMeta(metaKeys);
-
-    const updates = [];
-    const newTotal = (current.total || 0) + totalDelta;
-    updates.push(['total', newTotal]);
-    if (latestScrape) {
-      const curLatest = current.latestScrape ? new Date(current.latestScrape).getTime() : 0;
-      if (latestScrape > curLatest) {
-        updates.push(['latestScrape', new Date(latestScrape).toISOString()]);
-      }
-    }
-    if (options.byPosition && Object.keys(positionDelta).length > 0) {
-      const curByPos = current.byPosition || {};
-      const newByPos = { ...curByPos };
-      for (const [pos, delta] of Object.entries(positionDelta)) {
-        newByPos[pos] = (newByPos[pos] || 0) + delta;
-        if (newByPos[pos] <= 0) delete newByPos[pos];
-      }
-      updates.push(['byPosition', newByPos]);
-    }
-
-    if (updates.length > 0) {
-      await this._setMetaBatch(updates);
-    }
+  // 内部工具：保留旧 API 以防外部调用
+  async _updateMetaFromPuts(putList, options = {}) {
+    if (!putList || putList.length === 0) return;
+    await this._refreshMetaAfterWrite();
   }
 
   // ─── 公开 API ────────────────────────────────────────────
@@ -469,7 +434,7 @@ class PlayerDatabase {
     const results = sqlDb.exec('SELECT * FROM players');
     if (results.length === 0 || results[0].values.length === 0) {
       sqlDb.close();
-      return { saved: 0, skipped: 0 };
+      return { saved: 0, skipped: 0, count: 0 };
     }
 
     const columns = results[0].columns;
@@ -486,6 +451,7 @@ class PlayerDatabase {
 
     sqlDb.close();
 
-    return await this.importPlayers(players);
+    const result = await this.importPlayers(players);
+    return { ...result, count: players.length };
   }
 }

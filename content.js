@@ -142,165 +142,165 @@
 
   // ─── 球员详情页面 ───────────────────────────────────────────
   function extractPlayerOverview() {
-    const players = [];
-    
+    const entries = [];
+
     try {
       const playerBox = document.getElementById('playerbox');
       if (!playerBox) {
         console.log('[BB Scraper] 未找到 #playerbox');
-        return players;
+        return entries;
       }
-      
+
       // 获取playerbox内的所有文本
       const boxText = playerBox.innerText;
-      
+
       // 解析基础数据
       const data = extractFromText(boxText);
-      
+
       // 提取国籍：从国旗图片的title属性
       const flagImg = playerBox.querySelector('img[title][src*="flags"]');
       if (flagImg && flagImg.title) {
         data.nationality = flagImg.title;
       }
-      
+
       // 如果没有从文本解析到ID，尝试从URL获取
       if (!data.id) {
         const idMatch = url.match(/\/player\/(\d+)\//);
         data.id = idMatch ? parseInt(idMatch[1]) : null;
       }
-      
+
       if (!data.id || !data.name) {
         console.log('[BB Scraper] 无法解析球员信息');
-        return players;
+        return entries;
       }
-      
+
       // 确保所有技能字段存在
-      const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling', 
-                         'driving', 'passing', 'inside_shot', 'inside_def', 
+      const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling',
+                         'driving', 'passing', 'inside_shot', 'inside_def',
                          'rebound', 'shot_block'];
       allSkills.forEach(skill => {
         if (data[skill] === undefined) data[skill] = 0;
       });
-      
-      players.push(data);
+
+      entries.push({ id: data.id, data, box: playerBox });
       console.log('[BB Scraper] 提取到球员:', data.name, data.id);
-      
+
     } catch (err) {
       console.error('[BB Scraper] 解析球员详情出错:', err);
     }
-    
-    return players;
+
+    return entries;
   }
 
   // ─── 转会市场页面 ───────────────────────────────────────────
   function extractTransferList() {
-    const players = [];
-    
+    const entries = [];
+
     try {
       // 查找所有球员容器
       const playerBoxes = document.querySelectorAll('#playerbox, .widebox, .oldbox');
       console.log(`[BB Scraper] 找到 ${playerBoxes.length} 个球员容器`);
-      
+
       playerBoxes.forEach(box => {
         // 只处理转会市场页面的球员box（不是详情页的单个playerbox）
         if (box.id === 'playerbox' && playerBoxes.length === 1) {
           return; // 这是详情页，不处理
         }
-        
+
         const boxText = box.innerText;
         const data = extractFromText(boxText);
-        
+
         // 提取国籍
         const flagImg = box.querySelector('img[title][src*="flags"]');
         if (flagImg && flagImg.title) {
           data.nationality = flagImg.title;
         }
-        
+
         if (data.id && data.name) {
           // 补充缺失字段
-          const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling', 
-                             'driving', 'passing', 'inside_shot', 'inside_def', 
+          const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling',
+                             'driving', 'passing', 'inside_shot', 'inside_def',
                              'rebound', 'shot_block'];
           allSkills.forEach(skill => {
             if (data[skill] === undefined) data[skill] = 0;
           });
-          players.push(data);
+          entries.push({ id: data.id, data, box });
         }
       });
-      
+
     } catch (err) {
       console.error('[BB Scraper] 解析转会市场出错:', err);
     }
-    
-    return players;
+
+    return entries;
   }
 
   // ─── 球队球员列表页面 ───────────────────────────────────────
   function extractTeamPlayers() {
-    const players = [];
-    
+    const entries = [];
+
     try {
       const playerBoxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
-      
+
       playerBoxes.forEach(box => {
         const boxText = box.innerText;
         const data = extractFromText(boxText);
-        
+
         // 提取国籍
         const flagImg = box.querySelector('img[title][src*="flags"]');
         if (flagImg && flagImg.title) {
           data.nationality = flagImg.title;
         }
-        
+
         if (data.id && data.name) {
-          const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling', 
-                             'driving', 'passing', 'inside_shot', 'inside_def', 
+          const allSkills = ['jump_shot', 'jump_range', 'perim_def', 'handling',
+                             'driving', 'passing', 'inside_shot', 'inside_def',
                              'rebound', 'shot_block'];
           allSkills.forEach(skill => {
             if (data[skill] === undefined) data[skill] = 0;
           });
-          
+
           // 检查技能是否全部为0（非本球队的未出售球员技能不可见）
           const hasSkills = allSkills.some(skill => data[skill] > 0);
           if (!hasSkills) {
             console.log(`[BB Scraper] 跳过无技能数据的球员: ${data.name} (${data.id})`);
             return;
           }
-          
-          players.push(data);
+
+          entries.push({ id: data.id, data, box });
         }
       });
-      
+
     } catch (err) {
       console.error('[BB Scraper] 解析球队页面出错:', err);
     }
-    
-    return players;
+
+    return entries;
   }
 
   // ─── 主提取函数 ──────────────────────────────────────────────
   function extractData() {
-    let players = [];
+    let entries = [];
 
     switch (pageType) {
       case 'playerOverview':
-        players = extractPlayerOverview();
+        entries = extractPlayerOverview();
         break;
       case 'transferlist':
-        players = extractTransferList();
+        entries = extractTransferList();
         break;
       case 'teamPlayers':
-        players = extractTeamPlayers();
+        entries = extractTeamPlayers();
         break;
       default:
         console.log('[BB Scraper] 未知页面类型');
         return;
     }
 
-    console.log(`[BB Scraper] 提取到 ${players.length} 名球员`, players);
+    console.log(`[BB Scraper] 提取到 ${entries.length} 名球员`, entries);
 
     // 调试：打印页面内容
-    if (players.length === 0) {
+    if (entries.length === 0) {
       const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
       console.log(`[BB Scraper] 找到 ${boxes.length} 个球员容器`);
       if (boxes.length > 0) {
@@ -308,9 +308,30 @@
       }
     }
 
-    if (players.length > 0) {
+    // 找出"页面有 box 但本次未提取到数据"的容器
+    // （如球队页面里没技能数据的球员、本队对手的外援等）
+    const extractedIds = new Set(entries.map(e => e.id));
+    const allBoxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
+    const missingBoxes = [];
+    allBoxes.forEach(box => {
+      // 跳过已经注入过面板的容器
+      if (box.querySelector('.bbs-local-data-panel')) return;
+      const id = extractIdFromContainer(box);
+      if (id && !extractedIds.has(id)) {
+        missingBoxes.push({ id, box });
+      }
+    });
+
+    // 只在球员详情/球队页面注入本地面板
+    if (pageType === 'playerOverview' || pageType === 'teamPlayers') {
+      injectLocalDataPanels(missingBoxes);
+    }
+
+    // 保存已提取到的球员（fire-and-forget，不阻塞提取/注入）
+    if (entries.length > 0) {
+      const players = entries.map(e => e.data);
       chrome.runtime.sendMessage(
-        { action: 'savePlayers', players: players },
+        { action: 'savePlayers', players },
         (response) => {
           if (chrome.runtime.lastError) {
             console.error('[BB Scraper] 发送消息失败:', chrome.runtime.lastError.message);
@@ -321,11 +342,6 @@
           }
         }
       );
-    }
-
-    // 仅球员详情和球队页面：在页面内显示本地已存储的数据
-    if (pageType === 'playerOverview' || pageType === 'teamPlayers') {
-      injectLocalDataPanels();
     }
   }
 
@@ -390,26 +406,16 @@
   }
 
   // ─── 在页面内注入本地数据面板 ─────────────────────────────
-  function injectLocalDataPanels() {
-    const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
-    if (boxes.length === 0) return;
+  // 只对页面"未提取到数据"的球员容器注入本地面板：
+  // - 入参 entries 是 extractData() 中"未成功提取"的球员容器列表
+  // - 页面已展示的球员不重复显示本地数据
+  // - 避免对无关 box 调用 extractIdFromContainer（由 extractData 预处理）
+  function injectLocalDataPanels(entries) {
+    if (!entries || entries.length === 0) return;
 
-    const ids = [];
-    const boxIdMap = new Map(); // id -> box element
-    boxes.forEach(box => {
-      // 跳过已经注入过面板的容器
-      if (box.querySelector('.bbs-local-data-panel')) return;
-      const id = extractIdFromContainer(box);
-      if (id) {
-        ids.push(id);
-        boxIdMap.set(id, box);
-      }
-    });
-
-    if (ids.length === 0) return;
-
+    const ids = entries.map(e => e.id);
     chrome.runtime.sendMessage(
-      { action: 'getPlayersByIds', ids: ids },
+      { action: 'getPlayersByIds', ids },
       (response) => {
         if (chrome.runtime.lastError || !response || !response.success) return;
         const players = response.players || [];
@@ -418,15 +424,15 @@
         const playerMap = new Map(players.map(p => [p.id, p]));
         let injected = 0;
 
-        boxIdMap.forEach((box, id) => {
+        entries.forEach(({ id, box }) => {
+          // 防止重试期间 box 已被其他路径注入过
+          if (box.querySelector('.bbs-local-data-panel')) return;
+
           const player = playerMap.get(id);
           if (!player) return;
 
-          // 确保容器可以定位
-          const computedPos = window.getComputedStyle(box).position;
-          if (computedPos === 'static') {
-            box.style.position = 'relative';
-          }
+          // 直接设 inline 样式，省去 getComputedStyle 触发的 layout
+          box.style.position = 'relative';
 
           const panel = createDataPanel(player);
           box.appendChild(panel);
@@ -434,7 +440,7 @@
         });
 
         if (injected > 0) {
-          console.log(`[BB Scraper] 已在 ${injected} 个球员容器内注入本地数据面板`);
+          console.log(`[BB Scraper] 已在 ${injected} 个无数据球员容器内注入本地数据面板`);
         }
       }
     );

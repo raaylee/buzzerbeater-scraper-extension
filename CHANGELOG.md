@@ -1,5 +1,32 @@
 # BuzzerBeater Scraper Extension - 更新日志
 
+## Ver 1.2.0 (2026-08-06)
+
+### 新增功能
+- **面板注入逻辑优化**：页面内本地数据面板现在严格按"页面未提取到 → 查询本地 → 注入"流程执行
+  - 页面已展示技能数据的球员不重复显示本地面板
+  - 仅对页面缺失技能数据的球员（属性私有）显示本地记录面板
+
+### 问题修复
+- **私有属性球员面板显示**：修复属性私有的球员页面内无任何数据提示的问题
+  - 球员详情页 (`extractPlayerOverview`) 和球队列表 (`extractTeamPlayers`) 在技能字段全为 0 时不再入库，避免污染数据库
+  - 但已入库的历史记录（即使技能全为 0）仍会在面板中显示抓取时间，文案改为"技能数据未采集"
+- **属性未公开时不保存占位数据**：球员详情页检测到 `hasSkills=false` 时跳过本次入库，由本地面板接管展示
+- **meta 统计自愈**：`getStats` 在 `_meta` 缺失时回退到全量统计并回写
+- **批量 I/O 优化**：`savePlayers` / `importPlayers` / `getPlayersByIds` 改为单事务内并行请求，减少微任务调度
+- **回退惰性加载 sql.js**：恢复 `background.js` 顶层 `importScripts('sql-asm.js', 'database.js')`，修复 SQLite 导出时"message port closed"错误
+- **`importFromSQLite` 返回 `count` 字段**：弹窗可正确显示导入文件中的记录总数
+
+### 修改文件
+| 文件 | 改动内容 |
+|------|----------|
+| `manifest.json` | 版本号 1.0.0 → 1.2.0 |
+| `content.js` | 提取函数返回 `{id, data, box}` 三元组；`extractData` 计算 `missingBoxes`；新增 `extractIdFromContainer`；面板注入仅针对未采集球员 |
+| `database.js` | `_meta` 缓存；`_refreshMetaAfterWrite` 全量重算；批量 `_batchGet`/`_batchPut`；`importFromSQLite` 返回 `count` |
+| `background.js` | 顶层 `importScripts` |
+
+---
+
 ## Ver 1.1 (2026-06-05)
 
 ### 新增功能

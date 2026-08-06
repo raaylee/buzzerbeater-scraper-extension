@@ -182,6 +182,14 @@
         if (data[skill] === undefined) data[skill] = 0;
       });
 
+      // 关键修复：属性未公开时，技能值全部为 0
+      // 此时页面看不到真实数据，不应阻止本地面板显示
+      const hasSkills = allSkills.some(skill => data[skill] > 0);
+      if (!hasSkills) {
+        console.log(`[BB Scraper] 球员 ${data.name} (${data.id}) 属性未公开，跳过采集，由本地面板接管`);
+        return entries;
+      }
+
       entries.push({ id: data.id, data, box: playerBox });
       console.log('[BB Scraper] 提取到球员:', data.name, data.id);
 
@@ -356,26 +364,27 @@
     return null;
   }
 
+  // ─── 面板用技能键名映射（模块级，供 createDataPanel 和 injectLocalDataPanels 共用）───
+  const SKILL_DISPLAY_KEYS = [
+    ['jump_shot', '跳投'],
+    ['jump_range', '范围'],
+    ['perim_def', '外防'],
+    ['handling', '控球'],
+    ['driving', '突破'],
+    ['passing', '传球'],
+    ['inside_shot', '内投'],
+    ['inside_def', '内防'],
+    ['rebound', '篮板'],
+    ['shot_block', '盖帽']
+  ];
+
   // ─── 创建数据展示面板DOM ──────────────────────────────────
   function createDataPanel(player) {
     const panel = document.createElement('div');
     panel.className = 'bbs-local-data-panel';
     panel.setAttribute('data-bbs-player-id', player.id);
 
-    const skillKeys = [
-      ['jump_shot', '跳投'],
-      ['jump_range', '范围'],
-      ['perim_def', '外防'],
-      ['handling', '控球'],
-      ['driving', '突破'],
-      ['passing', '传球'],
-      ['inside_shot', '内投'],
-      ['inside_def', '内防'],
-      ['rebound', '篮板'],
-      ['shot_block', '盖帽']
-    ];
-
-    const skillParts = skillKeys
+    const skillParts = SKILL_DISPLAY_KEYS
       .map(([key, label]) => {
         const v = player[key];
         return (v !== undefined && v !== null && v !== 0) ? `${label}:${v}` : null;
@@ -389,7 +398,7 @@
 
     panel.innerHTML = `
       <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
-      ${skillText ? `<div class="bbs-panel-skills">${escapeHtml(skillText)}</div>` : '<div class="bbs-panel-empty">无技能数据</div>'}
+      ${skillText ? `<div class="bbs-panel-skills">${escapeHtml(skillText)}</div>` : '<div class="bbs-panel-empty">技能数据未采集</div>'}
     `;
     return panel;
   }

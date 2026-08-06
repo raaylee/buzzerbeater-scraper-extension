@@ -7,29 +7,19 @@
 // 2. savePlayers/importPlayers 改为先批量 get 现有记录，
 //    再批量 put，减少微任务调度
 // 3. getPlayersByIds 改为并行请求
-// 4. sql-asm.js 改为惰性加载，SW 冷启动不再加载
+//
+// sql-asm.js 由 background.js 顶层 importScripts 加载，
+// 这里只缓存 initSqlJs() 的初始化结果。
 // ============================================================
 
-// ─── 惰性加载 sql.js ─────────────────────────────────────────
-// 仅在首次需要 SQLite 导出/导入时才 importScripts 并 initSqlJs，
-// 避免 Service Worker 冷启动时就加载 ~1MB 的 sql-asm.js
-//
-// MV3 Service Worker 约束：importScripts 必须在事件回调顶层同步调用，
-// 不能在 await 之后调用。因此 loadSqlJs 用同步 importScripts + 异步
-// initSqlJs 的两段式：调用方需要在 await 之前先 ensureSqlScriptsLoaded()。
 let _sqlPromise = null;
-
-function ensureSqlScriptsLoaded() {
-  // 同步执行 importScripts，调用方需保证此时仍在事件回调顶层
-  if (typeof initSqlJs === 'undefined') {
-    self.importScripts('sql-asm.js');
-  }
-}
 
 async function loadSqlJs() {
   if (_sqlPromise) return _sqlPromise;
-  ensureSqlScriptsLoaded();
-  _sqlPromise = initSqlJs().then(lib => lib);
+  if (typeof initSqlJs === 'undefined') {
+    throw new Error('sql.js 未加载，请确保background.js顶层importScripts了sql-asm.js');
+  }
+  _sqlPromise = initSqlJs();
   return _sqlPromise;
 }
 

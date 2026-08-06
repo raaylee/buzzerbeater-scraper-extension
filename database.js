@@ -297,9 +297,33 @@ class PlayerDatabase {
   }
 
   // 统计信息（走 _meta，不再遍历全表）
+  // 自愈：_meta 未初始化时（如从 v1 升级或首次打开插件），
+  // 回退到 getAllPlayers() 计算并回写 _meta，一次性完成修复
   async getStats() {
     await this.ready();
     const meta = await this._getMeta(['total', 'latestScrape']);
+
+    if (meta.total === null || meta.total === undefined) {
+      // _meta 缺失，回退到全量统计并回写
+      const players = await this.getAllPlayers();
+      let latestScrape = null;
+      if (players.length > 0) {
+        const sorted = [...players].sort((a, b) =>
+          new Date(b.scrapedAt || 0) - new Date(a.scrapedAt || 0)
+        );
+        latestScrape = sorted[0]?.scrapedAt || null;
+      }
+      // 回写 _meta，后续走快路径
+      await this._setMetaBatch([
+        ['total', players.length],
+        ['latestScrape', latestScrape]
+      ]);
+      return {
+        total: players.length,
+        latestScrape
+      };
+    }
+
     return {
       total: meta.total || 0,
       latestScrape: meta.latestScrape || null

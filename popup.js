@@ -11,6 +11,12 @@ document.addEventListener('DOMContentLoaded', () => {
     loadRecentPlayers();
   });
 
+  document.getElementById('btnImport').addEventListener('click', () => {
+    document.getElementById('importFile').click();
+  });
+
+  document.getElementById('importFile').addEventListener('change', handleImport);
+
   document.getElementById('btnExportJson').addEventListener('click', exportJson);
   document.getElementById('btnExportSqlite').addEventListener('click', exportSQLite);
 
@@ -164,6 +170,67 @@ function exportSQLite() {
       setStatus(`SQLite导出成功 (${response.size} bytes, ${response.count}条记录)`);
     } else {
       setStatus('导出失败: ' + (response?.error || '未知错误'));
+    }
+  });
+}
+
+function handleImport(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const fileName = file.name.toLowerCase();
+  const reader = new FileReader();
+
+  if (fileName.endsWith('.json')) {
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.players && Array.isArray(data.players)) {
+          importPlayers(data.players, 'JSON');
+        } else {
+          setStatus('JSON格式错误');
+        }
+      } catch (err) {
+        setStatus('JSON解析失败');
+      }
+    };
+    reader.readAsText(file);
+  } else if (fileName.endsWith('.sqlite')) {
+    reader.onload = (e) => {
+      const buffer = e.target.result;
+      chrome.runtime.sendMessage({
+        action: 'importSQLite',
+        data: Array.from(new Uint8Array(buffer))
+      }, (response) => {
+        if (response && response.success) {
+          setStatus(`SQLite导入成功 (${response.count}条记录)`);
+          loadStats();
+          loadRecentPlayers();
+        } else {
+          setStatus('SQLite导入失败: ' + (response?.error || '未知错误'));
+        }
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    setStatus('请选择.json或.sqlite文件');
+  }
+
+  // 清空input以便重复选择同一文件
+  event.target.value = '';
+}
+
+function importPlayers(players, source) {
+  chrome.runtime.sendMessage({
+    action: 'importPlayers',
+    players: players
+  }, (response) => {
+    if (response && response.success) {
+      setStatus(`${source}导入成功 (新增:${response.saved} 跳过:${response.skipped})`);
+      loadStats();
+      loadRecentPlayers();
+    } else {
+      setStatus(`${source}导入失败: ` + (response?.error || '未知错误'));
     }
   });
 }

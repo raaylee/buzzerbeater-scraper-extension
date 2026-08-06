@@ -129,10 +129,11 @@
     
     // 技能提取
     for (const [cnName, enName] of Object.entries(SKILL_MAP)) {
-      // 匹配格式：技能名: 等级 (数值)
-      const skillMatch = text.match(new RegExp(cnName + '[：:]\\s*([\\w\\s]+)\\s*\\((\\d+)\\)'));
+      // 匹配格式：技能名: 等级 (数值) 或 技能名: 等级(数值)
+      // 优先匹配括号中的数字，更可靠
+      const skillMatch = text.match(new RegExp(cnName + '[：:]\\s*.*?\\((\\d+)\\)'));
       if (skillMatch) {
-        data[enName] = parseInt(skillMatch[2]);
+        data[enName] = parseInt(skillMatch[1]);
       }
     }
     
@@ -297,7 +298,7 @@
     }
 
     console.log(`[BB Scraper] 提取到 ${players.length} 名球员`, players);
-    
+
     // 调试：打印页面内容
     if (players.length === 0) {
       const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
@@ -321,18 +322,176 @@
         }
       );
     }
+
+    // 仅球员详情和球队页面：在页面内显示本地已存储的数据
+    if (pageType === 'playerOverview' || pageType === 'teamPlayers') {
+      injectLocalDataPanels();
+    }
+  }
+
+  // ─── 从容器中提取球员ID（仅扫描前几行）────────────────────
+  function extractIdFromContainer(box) {
+    const text = box.innerText || '';
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+    for (let i = 0; i < Math.min(lines.length, 3); i++) {
+      const match = lines[i].match(/\((\d{6,})\)/);
+      if (match) return parseInt(match[1]);
+    }
+    return null;
+  }
+
+  // ─── 创建数据展示面板DOM ──────────────────────────────────
+  function createDataPanel(player) {
+    const panel = document.createElement('div');
+    panel.className = 'bbs-local-data-panel';
+    panel.setAttribute('data-bbs-player-id', player.id);
+
+    const skillKeys = [
+      ['jump_shot', '跳投'],
+      ['jump_range', '范围'],
+      ['perim_def', '外防'],
+      ['handling', '控球'],
+      ['driving', '突破'],
+      ['passing', '传球'],
+      ['inside_shot', '内投'],
+      ['inside_def', '内防'],
+      ['rebound', '篮板'],
+      ['shot_block', '盖帽']
+    ];
+
+    const skillParts = skillKeys
+      .map(([key, label]) => {
+        const v = player[key];
+        return (v !== undefined && v !== null && v !== 0) ? `${label}:${v}` : null;
+      })
+      .filter(Boolean);
+
+    const skillText = skillParts.join(' ');
+    const scrapedDate = player.scrapedAt
+      ? new Date(player.scrapedAt).toLocaleDateString('zh-CN')
+      : '';
+
+    panel.innerHTML = `
+      <div class="bbs-panel-header">📊 本地数据${scrapedDate ? ' (' + scrapedDate + ')' : ''}</div>
+      ${skillText ? `<div class="bbs-panel-skills">${escapeHtml(skillText)}</div>` : '<div class="bbs-panel-empty">无技能数据</div>'}
+    `;
+    return panel;
+  }
+
+  // ─── HTML转义（供面板使用） ───────────────────────────────
+  function escapeHtml(str) {
+    if (str === undefined || str === null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  // ─── 在页面内注入本地数据面板 ─────────────────────────────
+  function injectLocalDataPanels() {
+    const boxes = document.querySelectorAll('.widebox, .oldbox, #playerbox');
+    if (boxes.length === 0) return;
+
+    const ids = [];
+    const boxIdMap = new Map(); // id -> box element
+    boxes.forEach(box => {
+      // 跳过已经注入过面板的容器
+      if (box.querySelector('.bbs-local-data-panel')) return;
+      const id = extractIdFromContainer(box);
+      if (id) {
+        ids.push(id);
+        boxIdMap.set(id, box);
+      }
+    });
+
+    if (ids.length === 0) return;
+
+    chrome.runtime.sendMessage(
+      { action: 'getPlayersByIds', ids: ids },
+      (response) => {
+        if (chrome.runtime.lastError || !response || !response.success) return;
+        const players = response.players || [];
+        if (players.length === 0) return;
+
+        const playerMap = new Map(players.map(p => [p.id, p]));
+        let injected = 0;
+
+        boxIdMap.forEach((box, id) => {
+          const player = playerMap.get(id);
+          if (!player) return;
+
+          // 确保容器可以定位
+          const computedPos = window.getComputedStyle(box).position;
+          if (computedPos === 'static') {
+            box.style.position = 'relative';
+          }
+
+          const panel = createDataPanel(player);
+          box.appendChild(panel);
+          injected++;
+        });
+
+        if (injected > 0) {
+          console.log(`[BB Scraper] 已在 ${injected} 个球员容器内注入本地数据面板`);
+        }
+      }
+    );
+  }
+
+  // ─── 注入面板所需样式（仅注入一次）───────────────────────
+  function injectPanelStyles() {
+    if (document.getElementById('bbs-panel-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'bbs-panel-styles';
+    style.textContent = `
+      .bbs-local-data-panel {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        max-width: 60%;
+        background: rgba(26, 26, 46, 0.92);
+        color: #e0e0e0;
+        border: 1px solid #e94560;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 11px;
+        line-height: 1.4;
+        z-index: 9999;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        pointer-events: none;
+      }
+      .bbs-panel-header {
+        font-weight: 600;
+        color: #e94560;
+        margin-bottom: 3px;
+        font-size: 10px;
+      }
+      .bbs-panel-skills {
+        color: #a0a0b0;
+        white-space: normal;
+        word-break: break-all;
+      }
+      .bbs-panel-empty {
+        color: #666;
+        font-style: italic;
+      }
+    `;
+    document.head.appendChild(style);
   }
 
   // ─── 启动提取 ──────────────────────────────────────────────
   function tryExtract(attempts = 0) {
+    injectPanelStyles();
     extractData();
-    
+
     // 如果是转会市场，再尝试几次（数据可能是动态加载的）
     if (pageType === 'transferlist' && attempts < 3) {
       setTimeout(() => tryExtract(attempts + 1), 2000);
     }
   }
-  
+
   if (document.readyState === 'complete') {
     setTimeout(tryExtract, 1500);
   } else {

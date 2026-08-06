@@ -1,11 +1,42 @@
 // ============================================================
 // database.js — BuzzerBeater 球员数据库 (IndexedDB + SQLite导出)
 // ============================================================
+// 重构要点：
+// 1. 新增 _meta objectStore 缓存 total/latestScrape，
+//    getStats 不再遍历全表
+// 2. savePlayers/importPlayers 改为先批量 get 现有记录，
+//    再批量 put，减少微任务调度
+// 3. getPlayersByIds 改为并行请求
+// 4. sql-asm.js 改为惰性加载，SW 冷启动不再加载
+// ============================================================
+
+// ─── 惰性加载 sql.js ─────────────────────────────────────────
+// 仅在首次需要 SQLite 导出/导入时才 importScripts 并 initSqlJs，
+// 避免 Service Worker 冷启动时就加载 ~1MB 的 sql-asm.js
+//
+// MV3 Service Worker 约束：importScripts 必须在事件回调顶层同步调用，
+// 不能在 await 之后调用。因此 loadSqlJs 用同步 importScripts + 异步
+// initSqlJs 的两段式：调用方需要在 await 之前先 ensureSqlScriptsLoaded()。
+let _sqlPromise = null;
+
+function ensureSqlScriptsLoaded() {
+  // 同步执行 importScripts，调用方需保证此时仍在事件回调顶层
+  if (typeof initSqlJs === 'undefined') {
+    self.importScripts('sql-asm.js');
+  }
+}
+
+async function loadSqlJs() {
+  if (_sqlPromise) return _sqlPromise;
+  ensureSqlScriptsLoaded();
+  _sqlPromise = initSqlJs().then(lib => lib);
+  return _sqlPromise;
+}
 
 class PlayerDatabase {
   constructor() {
     this.dbName = 'buzzerbeaterDB';
-    this.dbVersion = 1;
+    this.dbVersion = 2; // 升级：新增 _meta objectStore
     this.dbReady = this._init();
   }
 
@@ -22,10 +53,17 @@ class PlayerDatabase {
       request.onupgradeneeded = (event) => {
         const db = event.target.result;
 
+        // players objectStore（与 v1 一致，保留 id 作为 keyPath）
         if (!db.objectStoreNames.contains('players')) {
           const store = db.createObjectStore('players', { keyPath: 'id' });
           store.createIndex('scrapedAt', 'scrapedAt', { unique: false });
           store.createIndex('position', 'position', { unique: false });
+        }
+
+        // _meta objectStore：存 total / latestScrape 等汇总数据
+        // keyPath: 'key', value: 'value'
+        if (!db.objectStoreNames.contains('_meta')) {
+          db.createObjectStore('_meta', { keyPath: 'key' });
         }
       };
     });
@@ -35,54 +73,204 @@ class PlayerDatabase {
     await this.dbReady;
   }
 
-  // ─── 保存球员数据（含一个月去重逻辑）─────────────────��──────
+  // ─── 内部工具：事务内批量 get ──────────────────────────────
+  // 单事务内发起 N 个并行 get 请求，所有结果统一返回
+  _batchGet(store, ids) {
+    return new Promise((resolve, reject) => {
+      if (!ids || ids.length === 0) return resolve([]);
+      const results = [];
+      let pending = ids.length;
+      let errored = false;
+
+      ids.forEach(id => {
+        const req = store.get(id);
+        req.onsuccess = () => {
+          if (req.result) results.push(req.result);
+          if (--pending === 0 && !errored) resolve(results);
+        };
+        req.onerror = () => {
+          if (--pending === 0 && !errored) resolve(results);
+        };
+      });
+    });
+  }
+
+  // ─── 内部工具：事务内批量 put ──────────────────────────────
+  _batchPut(store, records) {
+    return new Promise((resolve, reject) => {
+      const transaction = store.transaction;
+      if (!records || records.length === 0) {
+        transaction.oncomplete = () => resolve();
+        return;
+      }
+      let pending = records.length;
+      records.forEach(r => {
+        const req = store.put(r);
+        req.onsuccess = () => {
+          if (--pending === 0) { /* 等 transaction.oncomplete */ }
+        };
+        req.onerror = () => {
+          if (--pending === 0) { /* 等 transaction.oncomplete */ }
+        };
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  }
+
+  // ─── 内部工具：meta 读写 ──────────────────────────────────
+  async _getMeta(keys) {
+    await this.ready();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['_meta'], 'readonly');
+      const store = transaction.objectStore('_meta');
+      const result = {};
+      let pending = keys.length;
+      if (pending === 0) return resolve({});
+
+      keys.forEach(k => {
+        const req = store.get(k);
+        req.onsuccess = () => {
+          result[k] = req.result ? req.result.value : null;
+          if (--pending === 0) resolve(result);
+        };
+        req.onerror = () => {
+          if (--pending === 0) resolve(result);
+        };
+      });
+    });
+  }
+
+  async _setMeta(key, value) {
+    await this.ready();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['_meta'], 'readwrite');
+      const store = transaction.objectStore('_meta');
+      const req = store.put({ key, value });
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async _setMetaBatch(entries) {
+    await this.ready();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['_meta'], 'readwrite');
+      const store = transaction.objectStore('_meta');
+      entries.forEach(([key, value]) => store.put({ key, value }));
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+  }
+
+  // ─── 内部工具：根据 put 列表增量更新 meta ──────────────────
+  async _updateMetaFromPuts(putList, options = {}) {
+    if (!putList || putList.length === 0) return;
+
+    const ids = putList.map(p => p.id);
+    const existing = await this.getPlayersByIds(ids);
+    const existingMap = new Map(existing.map(p => [p.id, p]));
+
+    let totalDelta = 0;
+    let latestScrape = null;
+    const positionDelta = {};
+
+    for (const p of putList) {
+      const prev = existingMap.get(p.id);
+      if (!prev) {
+        totalDelta += 1;
+      }
+      // 计算最新 scrapedAt
+      const t = p.scrapedAt ? new Date(p.scrapedAt).getTime() : 0;
+      if (!latestScrape || t > latestScrape) latestScrape = t;
+      // 位置聚合（可选）
+      if (options.byPosition) {
+        const pos = p.position || 'Unknown';
+        // 只统计新增的
+        if (!prev) {
+          positionDelta[pos] = (positionDelta[pos] || 0) + 1;
+        } else if (prev.position !== pos) {
+          positionDelta[pos] = (positionDelta[pos] || 0) + 1;
+          positionDelta[prev.position] = (positionDelta[prev.position] || 0) - 1;
+        }
+      }
+    }
+
+    // 读取当前 meta，叠加 delta
+    const metaKeys = ['total', 'latestScrape'];
+    if (options.byPosition) metaKeys.push('byPosition');
+    const current = await this._getMeta(metaKeys);
+
+    const updates = [];
+    const newTotal = (current.total || 0) + totalDelta;
+    updates.push(['total', newTotal]);
+    if (latestScrape) {
+      const curLatest = current.latestScrape ? new Date(current.latestScrape).getTime() : 0;
+      if (latestScrape > curLatest) {
+        updates.push(['latestScrape', new Date(latestScrape).toISOString()]);
+      }
+    }
+    if (options.byPosition && Object.keys(positionDelta).length > 0) {
+      const curByPos = current.byPosition || {};
+      const newByPos = { ...curByPos };
+      for (const [pos, delta] of Object.entries(positionDelta)) {
+        newByPos[pos] = (newByPos[pos] || 0) + delta;
+        if (newByPos[pos] <= 0) delete newByPos[pos];
+      }
+      updates.push(['byPosition', newByPos]);
+    }
+
+    if (updates.length > 0) {
+      await this._setMetaBatch(updates);
+    }
+  }
+
+  // ─── 公开 API ────────────────────────────────────────────
+
+  // 保存球员数据（30天去重）
   async savePlayers(players) {
     await this.ready();
     if (!players || players.length === 0) return { saved: 0, skipped: 0 };
 
     const now = new Date();
+    const validPlayers = players.filter(p => p.id && p.name);
+    if (validPlayers.length === 0) return { saved: 0, skipped: 0 };
+
+    // 批量读取现有记录
+    const ids = validPlayers.map(p => p.id);
+    const existing = await this.getPlayersByIds(ids);
+    const existingMap = new Map(existing.map(p => [p.id, p]));
+
     let saved = 0;
     let skipped = 0;
+    const toPut = [];
 
-    const transaction = this.db.transaction(['players'], 'readwrite');
-    const store = transaction.objectStore('players');
-
-    for (const p of players) {
-      if (!p.id || !p.name) continue;
-
-      // 检查一个月内是否已有该球员的记录
-      const getRequest = store.get(p.id);
-      
-      const record = await new Promise((resolve) => {
-        getRequest.onsuccess = () => resolve(getRequest.result);
-        getRequest.onerror = () => resolve(null);
-      });
-
+    for (const p of validPlayers) {
+      const record = existingMap.get(p.id);
       if (record && record.scrapedAt) {
         const lastScraped = new Date(record.scrapedAt);
-        const diffMs = now - lastScraped;
-        const diffDays = diffMs / (1000 * 60 * 60 * 24);
+        const diffDays = (now - lastScraped) / (1000 * 60 * 60 * 24);
         if (diffDays < 30) {
           skipped++;
           continue;
         }
       }
-
-      // 保存/更新球员数据
-      store.put({
-        ...p,
-        scrapedAt: now.toISOString()
-      });
+      toPut.push({ ...p, scrapedAt: now.toISOString() });
       saved++;
     }
 
-    return new Promise((resolve) => {
-      transaction.oncomplete = () => resolve({ saved, skipped });
-      transaction.onerror = () => resolve({ saved, skipped });
-    });
+    if (toPut.length > 0) {
+      const transaction = this.db.transaction(['players'], 'readwrite');
+      const store = transaction.objectStore('players');
+      await this._batchPut(store, toPut);
+      await this._updateMetaFromPuts(toPut, { byPosition: false });
+    }
+
+    return { saved, skipped };
   }
 
-  // ─── 查询所有球员 ──────────────────────────────────────────
+  // 查询所有球员
   async getAllPlayers() {
     await this.ready();
 
@@ -96,34 +284,30 @@ class PlayerDatabase {
     });
   }
 
-  // ─── 统计信息 ──────────────────────────────────────────────
+  // 按ID批量查询球员（并行请求）
+  async getPlayersByIds(ids) {
+    await this.ready();
+    if (!ids || ids.length === 0) return [];
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['players'], 'readonly');
+      const store = transaction.objectStore('players');
+      this._batchGet(store, ids).then(resolve).catch(reject);
+    });
+  }
+
+  // 统计信息（走 _meta，不再遍历全表）
   async getStats() {
     await this.ready();
-
-    const allPlayers = await this.getAllPlayers();
-    const byPosition = {};
-
-    allPlayers.forEach(p => {
-      const pos = p.position || 'Unknown';
-      byPosition[pos] = (byPosition[pos] || 0) + 1;
-    });
-
-    let latestScrape = null;
-    if (allPlayers.length > 0) {
-      const sorted = [...allPlayers].sort((a, b) => 
-        new Date(b.scrapedAt) - new Date(a.scrapedAt)
-      );
-      latestScrape = sorted[0]?.scrapedAt || null;
-    }
-
+    const meta = await this._getMeta(['total', 'latestScrape']);
     return {
-      total: allPlayers.length,
-      byPosition,
-      latestScrape
+      total: meta.total || 0,
+      latestScrape: meta.latestScrape || null
     };
   }
 
-  // ─── 导出为JSON ────────────────────────────────────────────
+  // ─── 导出 ────────────────────────────────────────────────
+
   async exportData() {
     const players = await this.getAllPlayers();
     return {
@@ -133,18 +317,11 @@ class PlayerDatabase {
     };
   }
 
-  // ─── 导出为SQLite ──────────────────────────────────────────
   async exportAsSQLite() {
     const players = await this.getAllPlayers();
-    
-    // sql-asm.js 通过 initSqlJs() 初始化
-    if (typeof initSqlJs === 'undefined') {
-      throw new Error('sql.js 未加载，请确保background.js已加载sql-asm.js');
-    }
-    const SQL = await initSqlJs();
+    const SQL = await loadSqlJs();
     const db = new SQL.Database();
 
-    // 创建表
     db.run(`
       CREATE TABLE players (
         id              INTEGER PRIMARY KEY,
@@ -169,7 +346,6 @@ class PlayerDatabase {
       )
     `);
 
-    // 插入数据
     const stmt = db.prepare(`
       INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
@@ -199,7 +375,6 @@ class PlayerDatabase {
     }
     stmt.free();
 
-    // 导出数据库
     const data = db.export();
     db.close();
 
@@ -215,12 +390,88 @@ class PlayerDatabase {
     await this.ready();
 
     return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(
+        ['players', '_meta'], 'readwrite'
+      );
+      transaction.objectStore('players').clear();
+      transaction.objectStore('_meta').clear();
+
+      transaction.oncomplete = () => resolve({ cleared: true });
+      transaction.onerror = () => reject(transaction.error);
+    });
+  }
+
+  // ─── 导入球员数据（JSON数组）───────────────────────────────
+  async importPlayers(players) {
+    await this.ready();
+    if (!players || players.length === 0) return { saved: 0, skipped: 0 };
+
+    const now = new Date();
+    const validPlayers = players.filter(p => p.id && p.name);
+    if (validPlayers.length === 0) return { saved: 0, skipped: 0 };
+
+    const ids = validPlayers.map(p => p.id);
+    const existing = await this.getPlayersByIds(ids);
+    const existingMap = new Map(existing.map(p => [p.id, p]));
+
+    let saved = 0;
+    let skipped = 0;
+    const toPut = [];
+
+    for (const p of validPlayers) {
+      const record = existingMap.get(p.id);
+      if (record && record.scrapedAt) {
+        const existingTime = new Date(record.scrapedAt);
+        const importTime = p.scrapedAt ? new Date(p.scrapedAt) : new Date(0);
+        const diffDays = (now - existingTime) / (1000 * 60 * 60 * 24);
+        if (diffDays < 30 && importTime <= existingTime) {
+          skipped++;
+          continue;
+        }
+      }
+      toPut.push({
+        ...p,
+        scrapedAt: p.scrapedAt || now.toISOString()
+      });
+      saved++;
+    }
+
+    if (toPut.length > 0) {
       const transaction = this.db.transaction(['players'], 'readwrite');
       const store = transaction.objectStore('players');
-      const request = store.clear();
+      await this._batchPut(store, toPut);
+      await this._updateMetaFromPuts(toPut, { byPosition: false });
+    }
 
-      request.onsuccess = () => resolve({ cleared: true });
-      request.onerror = () => reject(request.error);
+    return { saved, skipped };
+  }
+
+  // ─── 从SQLite导入数据 ───────────────────────────────────────
+  async importFromSQLite(dataArray) {
+    const SQL = await loadSqlJs();
+    const buffer = new Uint8Array(dataArray);
+    const sqlDb = new SQL.Database(buffer);
+
+    const results = sqlDb.exec('SELECT * FROM players');
+    if (results.length === 0 || results[0].values.length === 0) {
+      sqlDb.close();
+      return { saved: 0, skipped: 0 };
+    }
+
+    const columns = results[0].columns;
+    const players = results[0].values.map(row => {
+      const obj = {};
+      columns.forEach((col, idx) => {
+        let val = row[idx];
+        // SQLite 导出列名为 scraped_at，转回 scrapedAt
+        if (col === 'scraped_at') col = 'scrapedAt';
+        obj[col] = val;
+      });
+      return obj;
     });
+
+    sqlDb.close();
+
+    return await this.importPlayers(players);
   }
 }

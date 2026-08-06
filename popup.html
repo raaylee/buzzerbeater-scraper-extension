@@ -207,10 +207,13 @@
 
   <div class="actions">
     <button class="btn btn-primary" id="btnRefresh">刷新</button>
+    <button class="btn btn-secondary" id="btnImport">导入</button>
     <button class="btn btn-secondary" id="btnExportJson">JSON</button>
     <button class="btn btn-secondary" id="btnExportSqlite">SQLite</button>
     <button class="btn btn-danger" id="btnClear">清空</button>
   </div>
+
+  <input type="file" id="importFile" accept=".json,.sqlite" style="display:none;">
 
   <div class="status-bar" id="statusBar">就绪</div>
 

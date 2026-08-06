@@ -2,13 +2,19 @@
 // background.js — BuzzerBeater 数据采集器 Service Worker
 // ============================================================
 
-importScripts('sql-asm.js', 'database.js');
+// 注意：sql-asm.js 由 database.js 在需要时惰性加载，以减少 SW 冷启动耗时
+importScripts('database.js');
 
 // ─── 初始化数据库 ────────────────────────────────────────────
 const db = new PlayerDatabase();
 
 // ─── 消息处理 ────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // 涉及 SQLite 的消息需要在事件回调顶层同步加载 sql-asm.js
+  if (message.action === 'exportSQLite' || message.action === 'importSQLite') {
+    ensureSqlScriptsLoaded();
+  }
+
   handleMessage(message)
     .then(result => sendResponse({ success: true, ...result }))
     .catch(err => {
@@ -35,6 +41,15 @@ async function handleMessage(message) {
 
     case 'exportSQLite':
       return await handleExportSQLite();
+
+    case 'importPlayers':
+      return await handleImportPlayers(message.players);
+
+    case 'importSQLite':
+      return await handleImportSQLite(message.data);
+
+    case 'getPlayersByIds':
+      return await handleGetPlayersByIds(message.ids);
 
     case 'clearAll':
       return await handleClearAll();
@@ -69,4 +84,17 @@ async function handleExportSQLite() {
 
 async function handleClearAll() {
   return await db.clearAll();
+}
+
+async function handleImportPlayers(players) {
+  return await db.importPlayers(players);
+}
+
+async function handleImportSQLite(dataArray) {
+  return await db.importFromSQLite(dataArray);
+}
+
+async function handleGetPlayersByIds(ids) {
+  const players = await db.getPlayersByIds(ids);
+  return { players };
 }
